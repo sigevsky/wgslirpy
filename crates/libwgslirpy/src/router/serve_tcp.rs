@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{io::{self, Error}, net::{SocketAddr, IpAddr, Ipv6Addr}, time::Duration};
 
 use bytes::BytesMut;
 use smoltcp::{
@@ -15,6 +15,16 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use crate::channelized_smoltcp_device::ChannelizedDevice;
+use prometheus::{Counter, Gauge};
+
+use super::BindTarget;
+
+lazy_static! {
+    static ref TCP_IN: Counter = register_counter!(opts!("tcp_in", "bytes")).unwrap();
+    static ref TCP_OUT: Counter = register_counter!(opts!("tcp_out", "bytes")).unwrap();
+    static ref SEND_QUEUE: Gauge = register_gauge!(opts!("send_queue", "bytes")).unwrap();
+    static ref RECV_QUEUE: Gauge = register_gauge!(opts!("recv_queue", "bytes")).unwrap();
+}
 
 const DANGLE_TIME_SECONDS: u64 = 10;
 
@@ -32,7 +42,9 @@ pub async fn serve_tcp(
     external_addr: IpEndpoint,
     mode: ServeTcpMode,
     mtu: usize,
-    tcp_buffer_size: usize,
+    send_tcp_buffer_size: usize,
+    receive_tcp_buffer_size: usize,
+    mb_local_bind_addr: Option<BindTarget>,
 ) -> anyhow::Result<()> {
     let target_addr = match external_addr.addr {
         IpAddress::Ipv4(x) => SocketAddr::new(std::net::IpAddr::V4(x.into()), external_addr.port),
@@ -114,11 +126,11 @@ pub async fn serve_tcp(
         }
     }
 
-    let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; tcp_buffer_size]);
-    let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; tcp_buffer_size]);
+    let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; receive_tcp_buffer_size]);
+    let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; send_tcp_buffer_size]);
     let tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
 
-    let mut external_tcp_buffer = vec![0; tcp_buffer_size];
+    let mut external_tcp_buffer = vec![0; send_tcp_buffer_size.max(receive_tcp_buffer_size)];
 
     let mut sockets = SocketSet::new([SocketStorage::EMPTY]);
     let h = sockets.add(tcp_socket);
@@ -129,7 +141,11 @@ pub async fn serve_tcp(
 
     let mut tcp = match mode {
         ServeTcpMode::Outgoing => {
-            let tcp_ret = TcpStream::connect(target_addr).await;
+            let tcp_ret = bind_and_connect(
+                mb_local_bind_addr,
+                target_addr,
+            )
+            .await;
             let tcp = match tcp_ret {
                 Ok(x) => x,
                 Err(e) => {
@@ -206,11 +222,7 @@ pub async fn serve_tcp(
         let s = sockets.get_mut::<tcp::Socket>(h);
 
         match s.state() {
-            State::Closed
-            | State::Listen
-            | State::Closing
-            | State::LastAck
-            | State::TimeWait => {
+            State::Closed | State::Listen | State::Closing | State::LastAck | State::TimeWait => {
                 debug!("Client TCP socket no longer active");
                 break 'main_loop;
             }
@@ -229,6 +241,9 @@ pub async fn serve_tcp(
         } else {
             0
         };
+
+        SEND_QUEUE.set(s.send_queue() as f64);
+        RECV_QUEUE.set(s.recv_queue() as f64);
 
         let (data_to_send_to_external_socket, do_shutdown): (Option<&[u8]>, bool) = if s.may_recv()
         {
@@ -266,7 +281,6 @@ pub async fn serve_tcp(
                     biased;
                     x = rx_from_wg.recv() => SelectOutcome::PacketFromWg(x),
                     x = tcp_w.shutdown() => { SelectOutcome::WrittenToRealTcpSocket(x.map(|()|0)) }
-                    x = tcp_r.read(&mut external_tcp_buffer[..nbsend]), if nbsend > 0 => SelectOutcome::ReadFromRealTcpSocket(x),
                     _ = tmo => SelectOutcome::TimePassed,
                 }
             }
@@ -295,7 +309,6 @@ pub async fn serve_tcp(
                 ii.poll(Instant::now(), &mut dev, &mut sockets);
             }
             SelectOutcome::PacketFromWg(Some(from_wg)) => {
-                trace!("Packet from wg of len {}", from_wg.len());
                 dev.rx = Some(from_wg);
                 ii.poll(Instant::now(), &mut dev, &mut sockets);
             }
@@ -308,14 +321,15 @@ pub async fn serve_tcp(
                 already_shutdowned = true;
             }
             SelectOutcome::WrittenToRealTcpSocket(Ok(n_bytes)) => {
-                trace!("Written to real TCP socket");
-                // mark this part of data as really received (not just peeked)
+                TCP_OUT.inc_by(n_bytes as f64);
                 s.recv(|_| (n_bytes, ()))?;
+                ii.poll(Instant::now(), &mut dev, &mut sockets);
             }
             SelectOutcome::ReadFromRealTcpSocket(Ok(n_bytes)) => {
-                trace!("Read from real TCP socket");
+                TCP_IN.inc_by(n_bytes as f64);
                 let ret = s.send_slice(&external_tcp_buffer[..n_bytes]);
                 assert_eq!(ret, Ok(n_bytes));
+                ii.poll(Instant::now(), &mut dev, &mut sockets);
             }
             SelectOutcome::Noop => {
                 let t = ii.poll_delay(Instant::now(), &mut sockets);
@@ -359,4 +373,42 @@ pub async fn serve_tcp(
     trace!("Finished dangling");
 
     Ok::<_, anyhow::Error>(())
+}
+
+async fn bind_and_connect(
+    mb_bind_tg: Option<BindTarget>,
+    remote_addr: SocketAddr,
+) -> io::Result<TcpStream> {
+    match mb_bind_tg {
+        Some(bind_target) => {
+            let socket = bind_target.0.create();
+
+            let ra = match socket.local_addr() {
+                Ok(lb) => {
+                    match lb {
+                        SocketAddr::V4(_) => {
+                            match remote_addr {
+                                SocketAddr::V4(_) => remote_addr,
+                                SocketAddr::V6(_) => Err(Error::new(io::ErrorKind::Other, "ipv6 not supported by the socket"))?,
+                            }
+                        },
+                        SocketAddr::V6(_) => {
+                            match remote_addr {
+                                SocketAddr::V4(ipv4addr) => {
+                                    // map ipv4 to ipv6
+                                    let ipv6_addr = Ipv6Addr::from(ipv4addr.ip().to_ipv6_mapped());
+                                    SocketAddr::new(IpAddr::V6(ipv6_addr), ipv4addr.port())
+                                },
+                                SocketAddr::V6(_) => remote_addr,
+                            }
+                        },
+                    }
+                },
+                Err(_) => Err(Error::new(io::ErrorKind::Other, "socket is not binded"))?,
+            };
+
+            socket.connect(ra).await
+        }
+        None => TcpStream::connect(remote_addr).await,
+    }
 }

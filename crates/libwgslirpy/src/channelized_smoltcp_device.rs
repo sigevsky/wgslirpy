@@ -3,31 +3,35 @@
 #![allow(missing_docs)]
 
 use bytes::BytesMut;
-use smoltcp::phy::{Device,RxToken,TxToken, Checksum};
+use prometheus::Gauge;
+use smoltcp::phy::{Checksum, Device, RxToken, TxToken};
 use tokio::sync::mpsc::Sender;
 use tracing::warn;
 
 use crate::TEAR_OF_ALLOCATION_SIZE;
 
+lazy_static! {
+    static ref TO_WG_USED: Gauge = register_gauge!(opts!("to_wg_used", "slots")).unwrap();
+}
 pub struct ChannelizedDevice {
-    pub tx : Sender<BytesMut>,
+    pub tx: Sender<BytesMut>,
 
     /// Put a packet to be handled by smoltcp here. Channelized device would take it from here.
     pub rx: Option<BytesMut>,
 
     /// Moderately big allocation to snip away pieces from it when we need to transmit packets into [`tx`].
-    /// 
+    ///
     /// When remaining capacity falls below some threshold, the buffer gets allocated again.
-    /// 
+    ///
     /// Idea is to reduce number of allocations at the expense of the size of allocated block.
     pub tear_off_buffer: BytesMut,
 
-    pub mtu : usize,
+    pub mtu: usize,
 }
 
 impl ChannelizedDevice {
     /// Create the device using given queue for transmitting packets, retuning given `mtu` as MTU.
-    /// 
+    ///
     /// Checksumming is enabled, menium is "IP".
     pub fn new(tx: Sender<BytesMut>, mtu: usize) -> Self {
         ChannelizedDevice {
@@ -48,7 +52,10 @@ impl<'b> Device for ChannelizedDevice {
     type TxToken<'a>
      = &'a mut ChannelizedDevice where Self: 'a;
 
-    fn receive(&mut self, _timestamp: smoltcp::time::Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+    fn receive(
+        &mut self,
+        _timestamp: smoltcp::time::Instant,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         if let Some(x) = self.rx.take() {
             //warn!("Received len={} {:?}", x.len(), x);
             Some((RxTokenWrap(x), self))
@@ -59,9 +66,10 @@ impl<'b> Device for ChannelizedDevice {
     }
 
     fn transmit(&mut self, _timestamp: smoltcp::time::Instant) -> Option<Self::TxToken<'_>> {
+        TO_WG_USED.set((self.tx.max_capacity() - self.tx.capacity()) as f64);
         if self.tx.capacity() == 0 {
-            warn!("No capacity to transmit");
-            return None
+            warn!("No capacity to transmit into wg");
+            return None;
         }
         Some(self)
     }
@@ -82,14 +90,16 @@ impl<'b> Device for ChannelizedDevice {
 impl RxToken for RxTokenWrap {
     fn consume<R, F>(mut self, f: F) -> R
     where
-        F: FnOnce(&mut [u8]) -> R {
+        F: FnOnce(&mut [u8]) -> R,
+    {
         f(&mut self.0[..])
     }
 }
 impl<'a> TxToken for &'a mut ChannelizedDevice {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
-        F: FnOnce(&mut [u8]) -> R {
+        F: FnOnce(&mut [u8]) -> R,
+    {
         self.tear_off_buffer.resize(len, 0);
         let ret = f(&mut self.tear_off_buffer[..]);
         let chunk = self.tear_off_buffer.split();

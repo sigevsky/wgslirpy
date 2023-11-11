@@ -1,28 +1,35 @@
 #![warn(missing_docs)]
 //! Library part of wgslirpy - Tokio-, smoltcp- and boringtun-based user-space router.
 //! See main (i.e. CLI tool) documentation for what is it.
+#[macro_use]
+extern crate lazy_static;
+#[macro_use]
+extern crate prometheus;
 
+const TEAR_OF_ALLOCATION_SIZE: usize = 262144;
 
-const TEAR_OF_ALLOCATION_SIZE : usize = 65536;
-
-pub mod wg;
-pub mod router;
 pub mod channelized_smoltcp_device;
 pub mod gue;
+pub mod router;
+pub mod wg;
 
 use tracing::warn;
 
 pub use wg::parsebase64_32;
 
-pub extern crate bytes;
 pub extern crate boringtun;
+pub extern crate bytes;
 pub extern crate smoltcp;
 pub extern crate tokio;
 
 /// Start the application using given Wireguard and routing options.
-/// 
+///
 /// Aboring `Future` returned by this function should abort all tasks spawned related by it and close all sockets.
-pub async fn run(wireguard_options: wg::Opts, router_options: router::Opts, transmit_queue_capacity: usize) -> anyhow::Result<()> { 
+pub async fn run(
+    wireguard_options: wg::Opts,
+    router_options: router::Opts,
+    transmit_queue_capacity: usize,
+) -> anyhow::Result<()> {
     let (tx_towg, rx_towg) = tokio::sync::mpsc::channel(transmit_queue_capacity);
     let (tx_fromwg, rx_fromwg) = tokio::sync::mpsc::channel(4);
     let _jh = ArmedJoinHandle(tokio::spawn(async move {
@@ -45,9 +52,13 @@ impl Drop for ArmedJoinHandle {
 }
 
 /// Start the application using given GUE and routing options. This mode is does not provide any encryption or security.
-/// 
+///
 /// Aboring `Future` returned by this function should abort all tasks spawned related by it and close all sockets.
-pub async fn run_gue(gue_options: gue::Opts, router_options: router::Opts, transmit_queue_capacity: usize) -> anyhow::Result<()> { 
+pub async fn run_gue(
+    gue_options: gue::Opts,
+    router_options: router::Opts,
+    transmit_queue_capacity: usize,
+) -> anyhow::Result<()> {
     let (tx_towg, rx_towg) = tokio::sync::mpsc::channel(transmit_queue_capacity);
     let (tx_fromwg, rx_fromwg) = tokio::sync::mpsc::channel(4);
     let _jh = ArmedJoinHandle(tokio::spawn(async move {

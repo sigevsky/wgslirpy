@@ -1,13 +1,14 @@
 //! Routing and smoltcp-facing part of the library.
-//! 
+//!
 //! This moduile allows a pair of tokio::sync::mpsc channels that represent sent and transmitted IP bytes to be used to access outer
 //! network using operating system's sockets.
-//! 
+//!
 //! "host" network represents operating system's sockets and communication counterparts that are accessed using them.
-//! 
+//!
 //! "internal" network represents senders and receivers of `BytesMut`-wrapped IP packet queues.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use bytes::BytesMut;
 use hashbrown::HashMap;
@@ -15,6 +16,7 @@ use hashbrown::HashMap;
 use smoltcp::wire::{IpAddress, IpProtocol, Ipv4Packet, Ipv6Packet, UdpPacket};
 use smoltcp::wire::{IpEndpoint, IpVersion, TcpPacket};
 
+use tokio::net::TcpSocket;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tracing::{debug, error, info, warn};
 
@@ -51,6 +53,14 @@ impl std::fmt::Display for NatKey {
     }
 }
 
+pub trait SocketProvider: Send + Sync {
+    fn create(&self) -> TcpSocket;
+}
+
+#[derive(Clone)]
+pub struct BindTarget(Arc<dyn SocketProvider>);
+
+
 /// Options regarding interaction with smoltcp and host sockets.
 pub struct Opts {
     /// If UDP datagrams are directed at this socket address then attempt to reply to a DNS request internally instead of forwarding the datagram properly
@@ -62,15 +72,20 @@ pub struct Opts {
     /// Maximum transfer unit to use for smoltcp stack
     pub mtu: usize,
 
+    /// Send smoltcp TCP socket buffer sizes. Does not affect host socket buffer sizes.
+    pub send_tcp_buffer_size: usize,
+
     /// Receive and send smoltcp TCP socket buffer sizes. Does not affect host socket buffer sizes.
-    pub tcp_buffer_size: usize,
+    pub receive_tcp_buffer_size: usize,
 
     /// Listen these UDP ports and direct content into the internal network.
-    
     pub incoming_udp: Vec<PortForward>,
 
     /// Listen these TCP ports on host and direct connections into the internal network.
     pub incoming_tcp: Vec<PortForward>,
+
+    /// Bind target to provide tcp connections
+    pub mb_bind_target: Option<BindTarget>,
 }
 
 /// Instructions how to forward a port from host to our internal IP network.
@@ -80,7 +95,7 @@ pub struct PortForward {
 
     /// Typically incoming connection or datagram address is also used as a source address within internal network.
     /// Setting `src` allows you to override this and just use source fixed address.
-    /// 
+    ///
     /// If port part is `0` and this port forward is used for `incoming_tcp`, the port number is filled in with nonzero value is some way.
     pub src: Option<SocketAddr>,
 
@@ -94,7 +109,7 @@ mod serve_tcp;
 mod serve_udp;
 
 /// Start the router using given options and a part of channels that represent internal network.
-/// 
+///
 /// Dropping the resulting `Future` should abort the entire router.
 pub async fn run(
     mut rx_from_wg: Receiver<BytesMut>,
@@ -102,7 +117,8 @@ pub async fn run(
     opts: Opts,
 ) -> anyhow::Result<()> {
     let mtu = opts.mtu;
-    let tcp_buffer_size = opts.tcp_buffer_size;
+    let send_tcp_buffer_size = opts.send_tcp_buffer_size;
+    let receive_tcp_buffer_size = opts.receive_tcp_buffer_size;
     let mut table = HashMap::<NatKey, Sender<BytesMut>>::new();
 
     for PortForward { host, src, dst } in opts.incoming_udp {
@@ -145,12 +161,13 @@ pub async fn run(
     ) = channel(4);
 
     // To make dropping router's Future automatically close listening ports
-    let mut tcp_auto_aborter : Vec<ArmedJoinHandle> = vec![];
+    let mut tcp_auto_aborter: Vec<ArmedJoinHandle> = vec![];
     for PortForward { host, src, dst } in opts.incoming_tcp {
         let tx_to_wg2 = tx_to_wg.clone();
         let tcps = tokio::net::TcpListener::bind(host).await?;
         let tx_opens2 = tx_opens.clone();
         let tx_closes2 = tx_closes.clone();
+        let mb_local_bind_addr = opts.mb_bind_target.clone();
         let jh = tokio::spawn(async move {
             if let Some(src) = src {
                 info!(
@@ -163,7 +180,7 @@ pub async fn run(
                     host, dst
                 );
             }
-            let mut counter : u16 = 1024;
+            let mut counter: u16 = 1024;
             while let Ok((tcp, from)) = tcps.accept().await {
                 let (tx_persocket_fromwg, rx_persocket_fromwg) = channel(4);
 
@@ -173,12 +190,15 @@ pub async fn run(
                 if src.port() == 0 {
                     src.set_port(counter);
                     counter = counter.wrapping_add(1);
-                    if counter == 0 { counter = 1024 }
+                    if counter == 0 {
+                        counter = 1024
+                    }
                 }
                 let k = NatKey::Tcp {
                     client_side: dst.into(),
                     external_side: src.into(),
                 };
+                let mb_local_bind_addr_ir = mb_local_bind_addr.clone();
                 tokio::spawn(async move {
                     info!("Incoming TCP connection from {} to {} on host side. Connecting from {} to {} within Wireguard.", from, host, src, dst);
 
@@ -186,9 +206,14 @@ pub async fn run(
                         tx_to_wg3,
                         rx_persocket_fromwg,
                         IpEndpoint::from(src),
-                        serve_tcp::ServeTcpMode::Incoming { tcp, client_addr: IpEndpoint::from(dst) },
+                        serve_tcp::ServeTcpMode::Incoming {
+                            tcp,
+                            client_addr: IpEndpoint::from(dst),
+                        },
                         mtu,
-                        tcp_buffer_size,
+                        send_tcp_buffer_size,
+                        receive_tcp_buffer_size,
+                        mb_local_bind_addr_ir,
                     )
                     .await;
 
@@ -244,11 +269,11 @@ pub async fn run(
 
         if buf.len() >= 4 {
             // Skip over simple GUE headers
-            if &buf[..4] == [0,4,0,0] {
-                buf=buf.split_off(4);
+            if &buf[..4] == [0, 4, 0, 0] {
+                buf = buf.split_off(4);
             }
-            if &buf[..4] == [0,0x29,0,0] {
-                buf=buf.split_off(4);
+            if &buf[..4] == [0, 0x29, 0, 0] {
+                buf = buf.split_off(4);
             }
         }
 
@@ -260,9 +285,9 @@ pub async fn run(
                 }
                 Ok(IpVersion::Ipv4) => {
                     let Ok(p) = Ipv4Packet::new_checked(&buf[..]) else {
-                    error!("Dwarf packet");
-                    continue;
-                };
+                        error!("Dwarf packet");
+                        continue;
+                    };
                     (
                         p.src_addr().into(),
                         p.dst_addr().into(),
@@ -272,9 +297,9 @@ pub async fn run(
                 }
                 Ok(IpVersion::Ipv6) => {
                     let Ok(p) = Ipv6Packet::new_checked(&buf[..]) else {
-                    error!("Dwarf packet");
-                    continue;
-                };
+                        error!("Dwarf packet");
+                        continue;
+                    };
                     (
                         p.src_addr().into(),
                         p.dst_addr().into(),
@@ -365,6 +390,7 @@ pub async fn run(
                 let (tx_persocket_fromwg, rx_persocket_fromwg) = channel(4);
                 let k = entry.key().clone();
                 let tx_closes = tx_closes.clone();
+                let mb_local_bind_addr = opts.mb_bind_target.clone();
                 tokio::spawn(async move {
                     let ret = match k {
                         NatKey::Tcp {
@@ -377,7 +403,9 @@ pub async fn run(
                                 external_side,
                                 serve_tcp::ServeTcpMode::Outgoing,
                                 mtu,
-                                tcp_buffer_size,
+                                send_tcp_buffer_size,
+                                receive_tcp_buffer_size,
+                                mb_local_bind_addr,
                             )
                             .await
                         }
