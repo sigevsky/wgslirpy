@@ -7,6 +7,7 @@
 //!
 //! "internal" network represents senders and receivers of `BytesMut`-wrapped IP packet queues.
 
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -54,11 +55,19 @@ impl std::fmt::Display for NatKey {
 }
 
 pub trait SocketProvider: Send + Sync {
-    fn create(&self) -> TcpSocket;
+    fn create(&self) -> io::Result<TcpSocket>;
 }
 
 #[derive(Clone)]
-pub struct BindTarget(Arc<dyn SocketProvider>);
+pub struct BindTarget {
+    provider: Arc<dyn SocketProvider> 
+}
+
+impl BindTarget {
+    fn new<A: SocketProvider + 'static>(a: A) -> BindTarget {
+        Self { provider: Arc::new(a) }
+    }
+}
 
 
 /// Options regarding interaction with smoltcp and host sockets.

@@ -149,7 +149,7 @@ pub async fn serve_tcp(
             let tcp = match tcp_ret {
                 Ok(x) => x,
                 Err(e) => {
-                    debug!("Failed to connect to upstream TCP: {e}");
+                    warn!("Failed to connect to upstream TCP: {e}");
                     // Run the deadline loop without a socket to deliver TCP RSTs.
 
                     let graveyard_deadline =
@@ -381,7 +381,7 @@ async fn bind_and_connect(
 ) -> io::Result<TcpStream> {
     match mb_bind_tg {
         Some(bind_target) => {
-            let socket = bind_target.0.create();
+            let socket = bind_target.provider.create()?;
 
             let ra = match socket.local_addr() {
                 Ok(lb) => {
