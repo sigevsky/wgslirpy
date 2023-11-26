@@ -64,7 +64,7 @@ pub struct BindTarget {
 }
 
 impl BindTarget {
-    fn new<A: SocketProvider + 'static>(a: A) -> BindTarget {
+    pub fn new<A: SocketProvider + 'static>(a: A) -> BindTarget {
         Self { provider: Arc::new(a) }
     }
 }
