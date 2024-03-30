@@ -30,5 +30,6 @@ smoltcp = {version = "0.10.0", default-features = false, features = [
   "log",
   "medium-ip",
 ]}
+async-trait = "0.1.79"
 tokio = {version = "1.29.1", features = ["rt", "net", "sync", "macros", "io-util", "time"]}
 tracing = "0.1.37"

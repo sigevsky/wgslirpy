@@ -71,10 +71,30 @@ impl BindTarget {
     }
 }
 
+#[async_trait::async_trait]
+pub trait DnsNameLookup: Send + Sync {
+    async fn lookup_host(&self, name: &str) -> io::Result<Vec<IpAddr>>;
+}
+
+pub struct DnsAddr {
+    pub addr: SocketAddr,
+    pub name_lookup: Arc<dyn DnsNameLookup>
+}
+
+pub struct DefaultDnsNameLookup;
+
+#[async_trait::async_trait]
+impl DnsNameLookup for DefaultDnsNameLookup {
+    async fn lookup_host(&self, host_name: &str) -> io::Result<Vec<IpAddr>> {
+        let adjusted_name = format!("{}:0", host_name);
+        tokio::net::lookup_host(adjusted_name).await.map(|iter| iter.map(|x| x.ip()).collect())
+    }
+}
+
 /// Options regarding interaction with smoltcp and host sockets.
 pub struct Opts {
     /// If UDP datagrams are directed at this socket address then attempt to reply to a DNS request internally instead of forwarding the datagram properly
-    pub dns_addr: Option<SocketAddr>,
+    pub dns_addr: Option<DnsAddr>,
 
     /// If ICMP or ICMPv6 packet is directed at this address, route it to smoltcp's interface (which will reply to ICMP echo requests) instead of dropping it.
     pub pingable: Option<IpAddr>,
@@ -323,12 +343,12 @@ pub async fn run(
             IpProtocol::Udp => match UdpPacket::new_checked(payload) {
                 Ok(u) => {
                     if let Some(ref dns) = opts.dns_addr {
-                        if dns.port() == u.dst_port() && dns.ip() == IpAddr::from(dst_addr) {
+                        if dns.addr.port() == u.dst_port() && dns.addr.ip() == IpAddr::from(dst_addr) {
                             debug!("Serve DNS");
                             let tx_to_wg2 = tx_to_wg.clone();
+                            let lookup = dns.name_lookup.clone();
                             tokio::spawn(async move {
-                                if let Ok(reply) = serve_dns::dns(buf).await {
-                                    debug!("Sending DNS reply");
+                                if let Ok(reply) = serve_dns::dns(buf, lookup).await {
                                     let _ = tx_to_wg2.send(reply).await;
                                 } else {
                                     warn!("Failed to calculate DNS reply");

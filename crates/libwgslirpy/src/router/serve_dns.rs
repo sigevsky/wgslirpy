@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::IpAddr, sync::Arc};
 
 use bytes::BytesMut;
 use simple_dns::ResourceRecord;
@@ -9,7 +9,9 @@ use smoltcp::{
 
 use tracing::{info, warn};
 
-pub async fn dns(from_wg: BytesMut) -> anyhow::Result<BytesMut> {
+use super::DnsNameLookup;
+
+pub async fn dns(from_wg: BytesMut, name_lookup_provider: Arc<dyn DnsNameLookup>) -> anyhow::Result<BytesMut> {
     let mut checksummer = ChecksumCapabilities::ignored();
     checksummer.udp = Checksum::Tx;
     checksummer.ipv4 = Checksum::Tx;
@@ -64,24 +66,24 @@ pub async fn dns(from_wg: BytesMut) -> anyhow::Result<BytesMut> {
 
     let mut reply = dns.clone().into_reply();
 
-    let nam = format!("{}:0", q.qname);
-    info!("DNS query {nam} from {src_addr} {srcport}");
+    info!("DNS query {} from {} {}", q.qname, src_addr, srcport);
 
-    if let Ok(ret) = tokio::net::lookup_host(nam).await {
+    if let Ok(ret) = name_lookup_provider.lookup_host(&q.qname.to_string()).await {
+        tracing::info!("DNS query {} resolved to {:?}", q.qname, ret);
         for x in ret {
             match x {
-                SocketAddr::V4(t) => reply.answers.push(ResourceRecord {
+                IpAddr::V4(t) => reply.answers.push(ResourceRecord {
                     name: q.qname.clone(),
                     class: simple_dns::CLASS::IN,
                     ttl: 60,
-                    rdata: simple_dns::rdata::RData::A(simple_dns::rdata::A::from(*t.ip())),
+                    rdata: simple_dns::rdata::RData::A(simple_dns::rdata::A::from(t)),
                     cache_flush: false,
                 }),
-                SocketAddr::V6(t) => reply.answers.push(ResourceRecord {
+                IpAddr::V6(t) => reply.answers.push(ResourceRecord {
                     name: q.qname.clone(),
                     class: simple_dns::CLASS::IN,
                     ttl: 60,
-                    rdata: simple_dns::rdata::RData::AAAA(simple_dns::rdata::AAAA::from(*t.ip())),
+                    rdata: simple_dns::rdata::RData::AAAA(simple_dns::rdata::AAAA::from(t)),
                     cache_flush: false,
                 }),
             }

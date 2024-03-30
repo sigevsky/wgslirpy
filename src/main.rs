@@ -1,7 +1,7 @@
 #![allow(unused_braces)]
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
+    path::PathBuf, sync::Arc,
 };
 
 use argh::FromArgs;
@@ -103,7 +103,7 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, Request, Response, Server,
 };
-use libwgslirpy::{parsebase64_32, router::PortForward};
+use libwgslirpy::{parsebase64_32, router::{DefaultDnsNameLookup, DnsAddr, PortForward}};
 use prometheus::{Encoder, TextEncoder};
 use tokio::sync::mpsc;
 use tracing::Level;
@@ -125,7 +125,10 @@ async fn main() -> anyhow::Result<()> {
     let dns_addr: IpAddr = IpAddr::V4(Ipv4Addr::new(176, 16, 255, 2));
 
     let router_config = libwgslirpy::router::Opts {
-        dns_addr: Some(SocketAddr::new(dns_addr, 53)),
+        dns_addr: Some(DnsAddr {
+            addr: SocketAddr::new(dns_addr, 53),
+            name_lookup: Arc::new(DefaultDnsNameLookup{}),
+        }),
         pingable: None,
         mtu: 1500,
         send_tcp_buffer_size: 65536 * 4,
