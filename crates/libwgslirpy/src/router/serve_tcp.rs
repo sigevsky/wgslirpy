@@ -1,4 +1,8 @@
-use std::{io::{self, Error}, net::{SocketAddr, IpAddr, Ipv6Addr}, time::Duration};
+use std::{
+    io::{self, Error},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    time::Duration,
+};
 
 use bytes::BytesMut;
 use smoltcp::{
@@ -28,6 +32,9 @@ lazy_static! {
 
 const DANGLE_TIME_SECONDS: u64 = 10;
 
+// TODO: externalize
+const SELF_ADDR: IpAddr = IpAddr::V4(Ipv4Addr::new(176, 16, 255, 1));
+
 pub enum ServeTcpMode {
     Outgoing,
     Incoming {
@@ -47,8 +54,8 @@ pub async fn serve_tcp(
     mb_local_bind_addr: Option<BindTarget>,
 ) -> anyhow::Result<()> {
     let target_addr = match external_addr.addr {
-        IpAddress::Ipv4(x) => SocketAddr::new(std::net::IpAddr::V4(x.into()), external_addr.port),
-        IpAddress::Ipv6(x) => SocketAddr::new(std::net::IpAddr::V6(x.into()), external_addr.port),
+        IpAddress::Ipv4(x) => SocketAddr::new(IpAddr::V4(x.into()), external_addr.port),
+        IpAddress::Ipv6(x) => SocketAddr::new(IpAddr::V6(x.into()), external_addr.port),
     };
 
     let mut dev = ChannelizedDevice::new(tx_to_wg, mtu);
@@ -58,6 +65,13 @@ pub async fn serve_tcp(
     ii.update_ip_addrs(|aa| {
         let _ = aa.push(IpCidr::new(external_addr.addr, 0));
     });
+
+    let target_addr = if target_addr.ip() == SELF_ADDR {
+        warn!("Self addressing detected, redirecting to localhost");
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), target_addr.port())
+    } else {
+        target_addr
+    };
 
     /// To enable avoid un-rust-analyzer-able big content of tokio::select.
     #[derive(Debug)]
@@ -141,11 +155,7 @@ pub async fn serve_tcp(
 
     let mut tcp = match mode {
         ServeTcpMode::Outgoing => {
-            let tcp_ret = bind_and_connect(
-                mb_local_bind_addr,
-                target_addr,
-            )
-            .await;
+            let tcp_ret = bind_and_connect(mb_local_bind_addr, target_addr).await;
             let tcp = match tcp_ret {
                 Ok(x) => x,
                 Err(e) => {
@@ -386,11 +396,12 @@ async fn bind_and_connect(
             let ra = match socket.local_addr() {
                 Ok(lb) => {
                     match lb {
-                        SocketAddr::V4(_) => {
-                            match remote_addr {
-                                SocketAddr::V4(_) => remote_addr,
-                                SocketAddr::V6(_) => Err(Error::new(io::ErrorKind::Other, "ipv6 not supported by the socket"))?,
-                            }
+                        SocketAddr::V4(_) => match remote_addr {
+                            SocketAddr::V4(_) => remote_addr,
+                            SocketAddr::V6(_) => Err(Error::new(
+                                io::ErrorKind::Other,
+                                "ipv6 not supported by the socket",
+                            ))?,
                         },
                         SocketAddr::V6(_) => {
                             match remote_addr {
@@ -398,12 +409,12 @@ async fn bind_and_connect(
                                     // map ipv4 to ipv6
                                     let ipv6_addr = Ipv6Addr::from(ipv4addr.ip().to_ipv6_mapped());
                                     SocketAddr::new(IpAddr::V6(ipv6_addr), ipv4addr.port())
-                                },
+                                }
                                 SocketAddr::V6(_) => remote_addr,
                             }
-                        },
+                        }
                     }
-                },
+                }
                 Err(_) => Err(Error::new(io::ErrorKind::Other, "socket is not binded"))?,
             };
 

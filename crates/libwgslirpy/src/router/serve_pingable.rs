@@ -20,7 +20,6 @@ pub async fn pingable(
     _client_addr: IpAddress,
     mtu: usize,
 ) -> anyhow::Result<()> {
-  
     let mut dev = ChannelizedDevice::new(tx_to_wg, mtu);
 
     let ic = Config::new(HardwareAddress::Ip);
@@ -91,7 +90,6 @@ pub async fn pingable(
             }
         }
     }
-
 
     let deadline = tokio::time::sleep(Duration::from_secs(DANGLE_TIME_SECONDS));
     tokio::pin!(deadline);

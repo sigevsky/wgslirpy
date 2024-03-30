@@ -4,19 +4,18 @@ use bytes::BytesMut;
 use smoltcp::{
     phy::{Checksum, ChecksumCapabilities},
     wire::{
-        IpAddress, IpEndpoint, IpProtocol, IpRepr, Ipv4Packet, Ipv6Packet,
-        UdpPacket, IpVersion,
+        IpAddress, IpEndpoint, IpProtocol, IpRepr, IpVersion, Ipv4Packet, Ipv6Packet, UdpPacket,
     },
 };
 use tokio::{
     net::UdpSocket,
     sync::mpsc::{Receiver, Sender},
 };
-use tracing::{warn, debug};
+use tracing::{debug, warn};
 
 use crate::TEAR_OF_ALLOCATION_SIZE;
 
-pub const UDP_CONNECTION_EXPIRATION_SECONDS : u64 = 92;
+pub const UDP_CONNECTION_EXPIRATION_SECONDS: u64 = 92;
 
 pub async fn serve_udp(
     tx_to_wg: Sender<BytesMut>,
@@ -25,7 +24,7 @@ pub async fn serve_udp(
     bind_addr: Option<SocketAddr>,
     force_srcaddr: Option<IpEndpoint>,
 ) -> anyhow::Result<()> {
-    let ua = bind_addr.unwrap_or_else(||match client_addr.addr {
+    let ua = bind_addr.unwrap_or_else(|| match client_addr.addr {
         IpAddress::Ipv4(_) => {
             SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
         }
@@ -59,8 +58,6 @@ pub async fn serve_udp(
         Timeout,
     }
 
-
-
     'recv_from_wg: loop {
         let deadline = tokio::time::sleep(Duration::from_secs(UDP_CONNECTION_EXPIRATION_SECONDS));
 
@@ -72,47 +69,38 @@ pub async fn serve_udp(
         match ret {
             SelectOutcome::FromWg(from_wg) => {
                 let Some(from_wg) = from_wg else {
-                    break 'recv_from_wg
+                    break 'recv_from_wg;
                 };
 
                 let buf = &from_wg[..];
-                let (src_addr, dst_addr, payload): (
-                    IpAddress,
-                    IpAddress,
-                    &[u8],
-                ) = match IpVersion::of_packet(&buf[..]) {
-                    Err(_e) => {
-                        continue;
-                    }
-                    Ok(IpVersion::Ipv4) => {
-                        let Ok(p) = Ipv4Packet::new_checked(&buf[..]) else { continue; };
-                        (
-                            p.src_addr().into(),
-                            p.dst_addr().into(),
-                            p.payload(),
-                        )
-                    }
-                    Ok(IpVersion::Ipv6) => {
-                        let Ok(p) = Ipv6Packet::new_checked(&buf[..]) else { continue; };
-                        (
-                            p.src_addr().into(),
-                            p.dst_addr().into(),
-                            p.payload(),
-                        )
-                    }
-                };
+                let (src_addr, dst_addr, payload): (IpAddress, IpAddress, &[u8]) =
+                    match IpVersion::of_packet(&buf[..]) {
+                        Err(_e) => {
+                            continue;
+                        }
+                        Ok(IpVersion::Ipv4) => {
+                            let Ok(p) = Ipv4Packet::new_checked(&buf[..]) else {
+                                continue;
+                            };
+                            (p.src_addr().into(), p.dst_addr().into(), p.payload())
+                        }
+                        Ok(IpVersion::Ipv6) => {
+                            let Ok(p) = Ipv6Packet::new_checked(&buf[..]) else {
+                                continue;
+                            };
+                            (p.src_addr().into(), p.dst_addr().into(), p.payload())
+                        }
+                    };
 
                 let (payload, to) = match UdpPacket::new_checked(payload) {
                     Ok(u) => {
-                        if ! u.verify_checksum(&src_addr, &dst_addr) {
+                        if !u.verify_checksum(&src_addr, &dst_addr) {
                             warn!("Failed UDP checksum");
                             continue;
                         }
                         (u.payload(), IpEndpoint::new(dst_addr, u.dst_port()))
-                    },
-                    Err(_e) => {
-                        continue
                     }
+                    Err(_e) => continue,
                 };
 
                 let to = SocketAddr::new(to.addr.into(), to.port);
@@ -123,7 +111,8 @@ pub async fn serve_udp(
                 warn!("Failure receiving from upstream UDP socket: {e}");
             }
             SelectOutcome::FromUdp(Ok((n, from))) => {
-                let external_addr = force_srcaddr.unwrap_or_else(||IpEndpoint::new(from.ip().into(), from.port()));
+                let external_addr =
+                    force_srcaddr.unwrap_or_else(|| IpEndpoint::new(from.ip().into(), from.port()));
 
                 let data = &external_udp_buffer[..n];
 

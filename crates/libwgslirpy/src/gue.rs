@@ -5,7 +5,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use bytes::BytesMut;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{warn, error};
+use tracing::{error, warn};
 
 use crate::TEAR_OF_ALLOCATION_SIZE;
 
@@ -34,12 +34,13 @@ impl Opts {
         mut rx_towg: Receiver<BytesMut>,
     ) -> anyhow::Result<()> {
         let mut timer = {
-            let mut i = tokio::time::interval(Duration::from_secs(self.keepalive_interval.unwrap_or(1 /* unused*/) as u64));
+            let mut i = tokio::time::interval(Duration::from_secs(
+                self.keepalive_interval.unwrap_or(1 /* unused*/) as u64,
+            ));
             i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             i
         };
 
-        
         let udp = tokio::net::UdpSocket::bind(self.bind_ip_port).await?;
 
         let mut udp_recv_buf = [0; 4096];

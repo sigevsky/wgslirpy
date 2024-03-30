@@ -102,7 +102,10 @@ impl Opts {
                 && current_peer_addr.is_some()
             {
                 connection_state.update_state(WgConnectionState::Pending);
-                (wg.format_handshake_initiation(&mut wg_scratch_buf, false), false)
+                (
+                    wg.format_handshake_initiation(&mut wg_scratch_buf, false),
+                    false,
+                )
             } else {
                 tokio::select! {
                     _instant = each_second.tick() => {

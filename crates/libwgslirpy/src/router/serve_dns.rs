@@ -4,17 +4,12 @@ use bytes::BytesMut;
 use simple_dns::ResourceRecord;
 use smoltcp::{
     phy::{Checksum, ChecksumCapabilities},
-    wire::{
-        IpAddress, IpProtocol, IpRepr, IpVersion, Ipv4Packet, Ipv6Packet, UdpPacket,
-    },
+    wire::{IpAddress, IpProtocol, IpRepr, IpVersion, Ipv4Packet, Ipv6Packet, UdpPacket},
 };
 
-use tracing::{warn, info};
+use tracing::{info, warn};
 
-
-pub async fn dns(
-    from_wg: BytesMut,
-) -> anyhow::Result<BytesMut> {
+pub async fn dns(from_wg: BytesMut) -> anyhow::Result<BytesMut> {
     let mut checksummer = ChecksumCapabilities::ignored();
     checksummer.udp = Checksum::Tx;
     checksummer.ipv4 = Checksum::Tx;
@@ -27,11 +22,15 @@ pub async fn dns(
                 anyhow::bail!("DNSERR1");
             }
             Ok(IpVersion::Ipv4) => {
-                let Ok(p) = Ipv4Packet::new_checked(&buf[..]) else { anyhow::bail!("DNSERR2") };
+                let Ok(p) = Ipv4Packet::new_checked(&buf[..]) else {
+                    anyhow::bail!("DNSERR2")
+                };
                 (p.src_addr().into(), p.dst_addr().into(), p.payload())
             }
             Ok(IpVersion::Ipv6) => {
-                let Ok(p) = Ipv6Packet::new_checked(&buf[..]) else { anyhow::bail!("DNSERR3") };
+                let Ok(p) = Ipv6Packet::new_checked(&buf[..]) else {
+                    anyhow::bail!("DNSERR3")
+                };
                 (p.src_addr().into(), p.dst_addr().into(), p.payload())
             }
         };
@@ -64,7 +63,7 @@ pub async fn dns(
     let q = &dns.questions[0];
 
     let mut reply = dns.clone().into_reply();
-    
+
     let nam = format!("{}:0", q.qname);
     info!("DNS query {nam} from {src_addr} {srcport}");
 
@@ -91,7 +90,6 @@ pub async fn dns(
         *reply.rcode_mut() = simple_dns::RCODE::ServerFailure;
     }
 
-
     let Ok(data) = reply.build_bytes_vec_compressed() else {
         anyhow::bail!("Failed to build DNS reply");
     };
@@ -99,13 +97,7 @@ pub async fn dns(
     let mut buf = BytesMut::new();
     buf.resize(data.len() + 64, 0);
 
-    let r = IpRepr::new(
-        dst_addr,
-        src_addr,
-        IpProtocol::Udp,
-        data.len() + 8,
-        64,
-    );
+    let r = IpRepr::new(dst_addr, src_addr, IpProtocol::Udp, data.len() + 8, 64);
 
     let len = r.buffer_len();
 
@@ -145,7 +137,6 @@ pub async fn dns(
         }
     }
     buf.resize(len, 0);
-    
 
     Ok::<_, anyhow::Error>(buf)
 }

@@ -60,15 +60,16 @@ pub trait SocketProvider: Send + Sync {
 
 #[derive(Clone)]
 pub struct BindTarget {
-    provider: Arc<dyn SocketProvider> 
+    provider: Arc<dyn SocketProvider>,
 }
 
 impl BindTarget {
     pub fn new<A: SocketProvider + 'static>(a: A) -> BindTarget {
-        Self { provider: Arc::new(a) }
+        Self {
+            provider: Arc::new(a),
+        }
     }
 }
-
 
 /// Options regarding interaction with smoltcp and host sockets.
 pub struct Opts {
@@ -230,7 +231,7 @@ pub async fn run(
                         warn!("TCP back connection from {from} exited with error: {e}");
                     }
 
-                    info!("  Finished serving {from}");
+                    info!("Finished serving {from}");
                     let _ = tx_closes3.send(k).await;
                 });
                 if tx_opens2.send((k, tx_persocket_fromwg)).await.is_err() {
@@ -323,6 +324,7 @@ pub async fn run(
                 Ok(u) => {
                     if let Some(ref dns) = opts.dns_addr {
                         if dns.port() == u.dst_port() && dns.ip() == IpAddr::from(dst_addr) {
+                            debug!("Serve DNS");
                             let tx_to_wg2 = tx_to_wg.clone();
                             tokio::spawn(async move {
                                 if let Ok(reply) = serve_dns::dns(buf).await {

@@ -1,6 +1,6 @@
 #![allow(unused_braces)]
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
 };
 
@@ -122,8 +122,10 @@ async fn main() -> anyhow::Result<()> {
 
     let (state_reporter, mut state_listener) = mpsc::channel(40);
 
+    let dns_addr: IpAddr = IpAddr::V4(Ipv4Addr::new(176, 16, 255, 2));
+
     let router_config = libwgslirpy::router::Opts {
-        dns_addr: None,
+        dns_addr: Some(SocketAddr::new(dns_addr, 53)),
         pingable: None,
         mtu: 1500,
         send_tcp_buffer_size: 65536 * 4,
@@ -135,13 +137,13 @@ async fn main() -> anyhow::Result<()> {
 
     // q
     let wg_config = libwgslirpy::wg::Opts {
-        private_key: parsebase64_32("qJU45d8idQmXDYrXAHrXTXLNuZaCbxCA+9E+MjSr3EI=")
+        private_key: parsebase64_32("eJXgrJlu7oJJxIJeiHZlyEBZNr4bZ/qP9OgLbZ1MI3s=")
             .unwrap()
             .into(),
-        peer_key: parsebase64_32("49pGhSbd67p+n1yNLa0Ay+L8oG/P/hiBIWsqQVBqPmA=")
+        peer_key: parsebase64_32("mK+EqWw5JpGsH6NdFp4nif7/O8CBbjLfE3WFqleyHRU=")
             .unwrap()
             .into(),
-        peer_endpoint: Some("192.168.0.100:9005".parse().unwrap()),
+        peer_endpoint: Some("192.168.0.100:9003".parse().unwrap()),
         keepalive_interval: Some(25),
         bind_ip_port: "0.0.0.0:9097".parse().unwrap(),
         connection_state_reporter: Some(state_reporter),
