@@ -142,7 +142,8 @@ pub async fn serve_tcp(
 
     let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; receive_tcp_buffer_size]);
     let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; send_tcp_buffer_size]);
-    let tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
+    let mut tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
+    tcp_socket.set_nagle_enabled(false);
 
     let mut external_tcp_buffer = vec![0; send_tcp_buffer_size.max(receive_tcp_buffer_size)];
 
@@ -418,6 +419,7 @@ async fn bind_and_connect(
                 Err(_) => Err(Error::new(io::ErrorKind::Other, "socket is not binded"))?,
             };
 
+            let _ = socket.set_nodelay(true);
             socket.connect(ra).await
         }
         None => TcpStream::connect(remote_addr).await,
