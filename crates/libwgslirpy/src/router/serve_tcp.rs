@@ -5,6 +5,8 @@ use std::{
 };
 
 use bytes::BytesMut;
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Gauge, Meter};
 use smoltcp::{
     iface::{Config, Interface, SocketSet, SocketStorage},
     socket::tcp::{self, State},
@@ -19,15 +21,32 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use crate::channelized_smoltcp_device::ChannelizedDevice;
-use prometheus::{Counter, Gauge};
 
 use super::BindTarget;
 
 lazy_static! {
-    static ref TCP_IN: Counter = register_counter!(opts!("tcp_in", "bytes")).unwrap();
-    static ref TCP_OUT: Counter = register_counter!(opts!("tcp_out", "bytes")).unwrap();
-    static ref SEND_QUEUE: Gauge = register_gauge!(opts!("send_queue", "bytes")).unwrap();
-    static ref RECV_QUEUE: Gauge = register_gauge!(opts!("recv_queue", "bytes")).unwrap();
+    static ref meter: Meter = opentelemetry::global::meter("proxy.state");
+    static ref TCP_IN: Counter<f64> = meter
+            .f64_counter("tcp_in")
+            .with_description("Wireguard wgslirp packets")
+            .build();
+    static ref TCP_OUT: Counter<f64> = meter
+            .f64_counter("tcp_out")
+            .with_description("Wireguard wgslirp packets")
+            .build();
+
+    static ref TCP_HIT: Counter<f64> = meter
+        .f64_counter("tcp_hit")
+        .with_description("Tcp wireguard hit")
+        .build();
+
+    static ref SEND_QUEUE: Gauge<f64> = meter
+        .f64_gauge("send_queue")
+        .with_description("Wireguard wgslirp packets").build();
+
+    static ref RECV_QUEUE: Gauge<f64> = meter
+        .f64_gauge("recv_queue")
+        .with_description("Wireguard wgslirp packets").build();
 }
 
 const DANGLE_TIME_SECONDS: u64 = 10;
@@ -253,8 +272,8 @@ pub async fn serve_tcp(
             0
         };
 
-        SEND_QUEUE.set(s.send_queue() as f64);
-        RECV_QUEUE.set(s.recv_queue() as f64);
+        SEND_QUEUE.record(s.send_queue() as f64, &[]);
+        RECV_QUEUE.record(s.recv_queue() as f64, &[]);
 
         let (data_to_send_to_external_socket, do_shutdown): (Option<&[u8]>, bool) = if s.may_recv()
         {
@@ -317,10 +336,12 @@ pub async fn serve_tcp(
         match ret {
             SelectOutcome::TimePassed => {
                 trace!("Time passed");
+                TCP_HIT.add(1.0, &[KeyValue::new("kind", "time")]);
                 ii.poll(Instant::now(), &mut dev, &mut sockets);
             }
             SelectOutcome::PacketFromWg(Some(from_wg)) => {
                 dev.rx = Some(from_wg);
+                TCP_HIT.add(1.0, &[KeyValue::new("kind", "wg")]);
                 ii.poll(Instant::now(), &mut dev, &mut sockets);
             }
             SelectOutcome::ReadFromRealTcpSocket(Ok(0)) => {
@@ -332,14 +353,16 @@ pub async fn serve_tcp(
                 already_shutdowned = true;
             }
             SelectOutcome::WrittenToRealTcpSocket(Ok(n_bytes)) => {
-                TCP_OUT.inc_by(n_bytes as f64);
+                TCP_OUT.add(n_bytes as f64, &[]);
+                TCP_HIT.add(1.0, &[KeyValue::new("kind", "write")]);
                 s.recv(|_| (n_bytes, ()))?;
                 ii.poll(Instant::now(), &mut dev, &mut sockets);
             }
             SelectOutcome::ReadFromRealTcpSocket(Ok(n_bytes)) => {
-                TCP_IN.inc_by(n_bytes as f64);
+                TCP_IN.add(n_bytes as f64, &[]);
                 let ret = s.send_slice(&external_tcp_buffer[..n_bytes]);
                 assert_eq!(ret, Ok(n_bytes));
+                TCP_HIT.add(1.0, &[KeyValue::new("kind", "read")]);
                 ii.poll(Instant::now(), &mut dev, &mut sockets);
             }
             SelectOutcome::Noop => {

@@ -11,16 +11,18 @@ version = "0.2.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.72"
+anyhow = "1.0.95"
 argh = "0.1.10"
-hyper = {version = "0.14.27", features = ["server", "http1", "tcp"]}
 lazy_static = "1.4.0"
 libwgslirpy = {version = "0.2.0", path = "crates/libwgslirpy"}
-prometheus = "0.13.3"
-tokio = {version = "1.29.1", features = ["full"]}
-tracing = "0.1.37"
+tokio = {version = "1.43.0", features = ["full"]}
+tracing = "0.1.41"
 tracing-log = "0.2.0"
-tracing-subscriber = {version = "0.3.17", optional = true}
+tracing-subscriber = {version = "0.3.19", optional = true}
+opentelemetry = {  version = "0.27.1", features = ["otel_unstable"] }
+opentelemetry-otlp = { version = "0.27.0", features = ["metrics", "tls"] }
+opentelemetry_sdk = { version = "0.27.1", features = ["rt-tokio"] }
+tonic = { version = "0.12.3", features = ["tls", "tls-webpki-roots"] }
 
 [features]
 default = ["tracing-subscriber", "tracing/release_max_level_debug"]

@@ -31,7 +31,7 @@ pub async fn run(
     transmit_queue_capacity: usize,
 ) -> anyhow::Result<()> {
     let (tx_towg, rx_towg) = tokio::sync::mpsc::channel(transmit_queue_capacity);
-    let (tx_fromwg, rx_fromwg) = tokio::sync::mpsc::channel(4);
+    let (tx_fromwg, rx_fromwg) = tokio::sync::mpsc::channel(15);
     let _jh = ArmedJoinHandle(tokio::spawn(async move {
         match wireguard_options.start(tx_fromwg, rx_towg).await {
             Ok(()) => warn!("Exited from Wireguard loop"),

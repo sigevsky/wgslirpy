@@ -1,23 +1,16 @@
 //! Simplified interface to `boringtun` based on Tokio's mpsc channels.
 
-use std::{net::SocketAddr, time::Duration};
-
 use base64::Engine;
 use boringtun::noise::{errors::WireGuardError, TunnResult};
 pub use boringtun::x25519::{PublicKey, StaticSecret};
 use bytes::BytesMut;
-use prometheus::{Counter, Gauge};
+use opentelemetry::KeyValue;
+use std::time::Instant;
+use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, warn};
 
 use crate::TEAR_OF_ALLOCATION_SIZE;
-
-lazy_static! {
-    static ref WG_IN: Counter = register_counter!(opts!("wg_in", "bytes")).unwrap();
-    static ref WG_OUT: Counter = register_counter!(opts!("wg_out", "bytes")).unwrap();
-    static ref FROM_WG_USED: Gauge = register_gauge!(opts!("from_wg_used", "slots")).unwrap();
-    static ref TEAR_OFF_BYTES: Gauge = register_gauge!(opts!("tear_of_used", "bytes")).unwrap();
-}
 
 /// Tracks current state of the wirguard connection
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -70,6 +63,42 @@ impl Opts {
         tx_fromwg: Sender<BytesMut>,
         mut rx_towg: Receiver<BytesMut>,
     ) -> anyhow::Result<()> {
+        let meter = opentelemetry::global::meter("proxy.state");
+
+        let wg_io = meter
+            .u64_counter("wg_io")
+            .with_description("Wireguard wgslirp packets")
+            .with_unit("bytes")
+            .build();
+
+        let from_wg_used = meter
+            .u64_histogram("from_wg_used")
+            .with_description("Wireguard wgslirp slots")
+            .with_boundaries(vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 25.0, 64.0])
+            .build();
+
+        let tear_off_bytes = meter
+            .u64_gauge("from_wg_tear_off_bytes")
+            .with_description("Wireguard wgslirp bytes")
+            .with_unit("bytes")
+            .build();
+
+        let wg_value_hits = meter
+            .u64_counter("wg_hit")
+            .with_description("Wireguard wgslirp packets")
+            .build();
+
+        let wg_duration = meter
+            .u64_histogram("wg_duration")
+            .with_description("Wireguard wgslirp duration in microseconds")
+            .with_boundaries(
+                vec![
+                    0., 8., 32., 64., 128., 256., 512., 1024., 2048., 4096., 8192., 16384., 32768.,
+                ]
+            )
+            .with_unit("microseconds")
+            .build();
+
         let mut wg = boringtun::noise::Tunn::new(
             self.private_key.clone(),
             self.peer_key,
@@ -86,8 +115,8 @@ impl Opts {
         let static_peer_addr = self.peer_endpoint;
 
         let mut each_second = tokio::time::interval(Duration::from_secs(1));
-        let mut udp_recv_buf = [0; 8182 - 32];
-        let mut wg_scratch_buf = [0; 8182];
+        let mut udp_recv_buf = [0; 65535];
+        let mut wg_scratch_buf = [0; 65535 + 32];
         let mut tear_off_buffer = BytesMut::with_capacity(TEAR_OF_ALLOCATION_SIZE);
         let mut connection_state = ConnectionState {
             current: WgConnectionState::Disconnected,
@@ -109,16 +138,20 @@ impl Opts {
             } else {
                 tokio::select! {
                     _instant = each_second.tick() => {
+                        wg_value_hits.add(1, &[KeyValue::new("kind", "time")]);
                         (wg.update_timers(&mut wg_scratch_buf), false)
                     }
                     ret = udp.recv_from(&mut udp_recv_buf[..]) => {
                         let ret = ret?;
-                        WG_IN.inc_by(ret.0 as f64);
+                        wg_io.add(ret.0 as u64, &[
+                            KeyValue::new("kind", "in"),
+                        ]);
                         let buf : &[u8] = &udp_recv_buf[0..(ret.0)];
                         let from : SocketAddr = ret.1;
 
                         last_seen_recv_address = Some(from);
                         connection_state.update_state(WgConnectionState::Connected);
+                        wg_value_hits.add(1, &[KeyValue::new("kind", "decap")]);
                         (wg.decapsulate(None, buf, &mut wg_scratch_buf), true)
                     }
                     ret = rx_towg.recv() => {
@@ -126,6 +159,7 @@ impl Opts {
                             warn!("Finished possible packets into wg");
                             break
                         };
+                        wg_value_hits.add(1, &[KeyValue::new("kind", "encap")]);
                         (wg.encapsulate(&incoming[..], &mut wg_scratch_buf), false)
                     }
                 }
@@ -141,6 +175,7 @@ impl Opts {
                     }
                 }
 
+                let started = Instant::now();
                 match tr {
                     TunnResult::Done => (),
                     TunnResult::Err(WireGuardError::ConnectionExpired) => {
@@ -154,13 +189,16 @@ impl Opts {
                         if let Some(cpa) = current_peer_addr {
                             match udp.send_to(b, cpa).await {
                                 Ok(_n) => {
-                                    WG_OUT.inc_by(_n as f64);
+                                    wg_duration.record(
+                                        started.elapsed().as_micros() as u64,
+                                        &[KeyValue::new("kind", "send-udp")],
+                                    );
+                                    wg_io.add(_n as u64, &[KeyValue::new("kind", "out")]);
+
                                     if connection_state.current == WgConnectionState::Malfunctioning
-                                    {
-                                        connection_state.update_state(WgConnectionState::Pending);
-                                    } else if connection_state.current
-                                        == WgConnectionState::Connected
-                                        && wg.time_since_last_handshake().is_none()
+                                        || (connection_state.current
+                                            == WgConnectionState::Connected
+                                            && wg.time_since_last_handshake().is_none())
                                     {
                                         connection_state.update_state(WgConnectionState::Pending);
                                     }
@@ -182,12 +220,19 @@ impl Opts {
                         }
                     }
                     TunnResult::WriteToTunnelV4(b, _) | TunnResult::WriteToTunnelV6(b, _) => {
-                        FROM_WG_USED.set((tx_fromwg.max_capacity() - tx_fromwg.capacity()) as f64);
+                        from_wg_used.record(
+                            (tx_fromwg.max_capacity() - tx_fromwg.capacity()) as u64,
+                            &[],
+                        );
 
                         tear_off_buffer.extend_from_slice(b);
-                        TEAR_OFF_BYTES.set(tear_off_buffer.len() as f64);
+                        tear_off_bytes.record(tear_off_buffer.len() as u64, &[]);
 
                         tx_fromwg.send(tear_off_buffer.split()).await?;
+                        wg_duration.record(
+                            started.elapsed().as_micros() as u64,
+                            &[KeyValue::new("kind", "send-tcp-buf")],
+                        );
 
                         if tear_off_buffer.capacity() < 2048 {
                             tear_off_buffer = BytesMut::with_capacity(TEAR_OF_ALLOCATION_SIZE);
